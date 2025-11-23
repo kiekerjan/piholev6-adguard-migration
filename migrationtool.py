@@ -38,6 +38,21 @@ class PiHoleExtractor:
             logger.warning(f"Pi-hole TOML config not found: {self.pihole_toml_path}")
         
         return True
+
+    def get_clients(self) -> List[Dict[str, str]]:
+        try:
+            with sqlite3.connect(self.gravity_db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('SELECT ip, comment FROM client;')
+                results = cursor.fetchall()
+                
+                return [
+                    {'ip': ip, 'comment': comment or 'No description'}
+                    for ip, comment in results
+                ]
+        except sqlite3.Error as e:
+            logger.error(f"Database error extracting clients: {e}")
+            return []
     
     def get_adlists(self) -> List[Dict[str, str]]:
         try:
@@ -134,16 +149,53 @@ class DNSResolver:
 
 class AdGuardConverter:
     """Converts Pi-hole data to AdGuard Home format."""
-    
+
+    @staticmethod
+    def convert_clients(clients: List[Dict[str, str]]) -> List[Dict[str, any]]:
+        return [
+            {
+                "safe_search": {
+                    "enabled": False,
+                    "bing": True,
+                    "duckduckgo": True,
+                    "ecosia": True,
+                    "google": True,
+                    "pixabay": True,
+                    "yandex": True,
+                    "youtube": True,
+                },
+                "blocked_services": {
+                    "schedule": {
+                        "time_zone": "Local"
+                    },
+                    "ids": []
+                },
+                "name": client["comment"],
+                "ids": client["ip"],
+                "upstreams": [],
+                "upstreams_cache_size": 0,
+                "upstreams_cache_enabled": False,
+                "use_global_settings": True,
+                "filtering_enabled": False,
+                "parental_enabled": False,
+                "safebrowsing_enabled": False,
+                "use_global_blocked_services": True,
+                "ignore_querylog": False,
+                "ignore_statistics": False,
+            }
+            for client in clients
+        ]
+
     @staticmethod
     def convert_adlists(adlists: List[Dict[str, str]]) -> List[Dict[str, any]]:
         return [
             {
                 'enabled': True,
                 'url': adlist['address'],
-                'name': adlist['comment']
+                'name': adlist['comment'],
+                'id': i + 1
             }
-            for adlist in adlists
+            for i, adlist in enumerate(adlists)
         ]
     
     @staticmethod
@@ -166,39 +218,45 @@ class AdGuardConverter:
         return [
             {
                 'domain': host['domain'],
-                'answer': host['ip_address']
+                'answer': host['ip_address'],
+                'enabled': True
             }
             for host in hosts
         ]
     
     @staticmethod
     def convert_cname_records(cnames: List[Dict[str, str]], resolver: DNSResolver) -> List[Dict[str, str]]:
-        rewrites = []
-        
-        for cname in cnames:
-            ip_address = resolver.resolve_to_ip(cname['target'])
-            if ip_address:
-                rewrites.append({
-                    'domain': cname['domain'],
-                    'answer': ip_address
-                })
-            else:
-                logger.warning(f"Skipping CNAME {cname['domain']} - could not resolve target")
-        
-        return rewrites
-
+        return [
+            {
+                'domain': cname['domain'],
+                'answer': cname['target'],
+                'enabled': True
+            }
+            for cname in cnames
+        ]
 
 class FileWriter:
     """Handles writing output files."""
     
     @staticmethod
-    def write_yaml(data: List[Dict], filename: str, description: str = "") -> None:
+    def write_yaml(data: List[Dict], filename: str, description: str = "", toplevelindent: bool = False) -> None:
         """Write data to YAML file."""
         try:
             with open(filename, 'w') as f:
                 if description:
                     f.write(f"# {description}\n")
-                yaml.dump(data, f, default_flow_style=False, indent=2, sort_keys=False)
+                if toplevelindent:
+                    # Dump normally
+                    yaml_str = yaml.dump(data, default_flow_style=False, indent=2, sort_keys=False)
+
+                    # Add 4 spaces before top-level dashes
+                    yaml_str = yaml_str.replace("\n", "\n    ")
+                    yaml_str = "    " + yaml_str
+
+                    # Save to file
+                    f.write(yaml_str)
+                else:
+                    yaml.dump(data, f, default_flow_style=False, indent=2, sort_keys=False)
             logger.info(f"✓ {description or 'Data'} written to {filename}")
         except Exception as e:
             logger.error(f"Error writing {filename}: {e}")
@@ -247,6 +305,9 @@ class ConversionOrchestrator:
         # Process CNAME records
         success &= self._process_cnames()
         
+        # Process clients
+        success &= self._process_clients()
+        
         if success:
             logger.info("Conversion completed successfully!")
             self._print_instructions()
@@ -254,6 +315,22 @@ class ConversionOrchestrator:
             logger.warning("Conversion completed with some errors.")
         
         return success
+
+    def _process_clients(self) -> bool:
+        logger.info("Processing clientss...")
+        clients = self.extractor.get_clients()
+        if not clients:
+            logger.warning("No clients found")
+            return True
+        
+        converted = self.converter.convert_clients(clients)
+        self.writer.write_yaml(
+            converted, 
+            'clients.yaml', 
+            f'AdGuard Home clients ({len(converted)} entries)',
+            toplevelindent=True
+        )
+        return True
     
     def _process_adlists(self) -> bool:
         logger.info("Processing adlists...")
