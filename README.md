@@ -19,7 +19,7 @@ This tool will take a Teleporter export and convert it into Adguard Home style y
    ```
 
 5. Follow the instructions on screen to update your AdGuardHome.yaml:
-   * Stop AdGuardHome with AdGuardHome -s stop
+   * Stop AdGuardHome with `AdGuardHome -s stop`
    * Copy the contents of adlists.yaml into AdGuardHome.yaml under 'filters'
    * Copy the contents of clients.yaml into AdGuardHome.yaml under 'clients->persistent'
    * The contents of dns_rewrites.yaml should be copied into AdGuardHome.yaml under the 'rewrites' key.
