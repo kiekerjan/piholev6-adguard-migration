@@ -8,6 +8,7 @@ import tomllib
 import sqlite3
 import dns.resolver
 import socket
+import uuid
 from pathlib import Path
 from typing import List, Dict, Tuple, Optional
 import logging
@@ -58,12 +59,13 @@ class PiHoleExtractor:
         try:
             with sqlite3.connect(self.gravity_db_path) as conn:
                 cursor = conn.cursor()
-                cursor.execute('SELECT address, comment FROM adlist WHERE enabled = 1;')
+                cursor.execute('SELECT address, comment, enabled FROM adlist;')
                 results = cursor.fetchall()
                 
                 return [
-                    {'address': address, 'comment': comment or 'No description'}
-                    for address, comment in results
+                    {'address': address, 'comment': comment or 'No description',
+                     'enabled': enabled}
+                    for address, comment, enabled in results
                 ]
         except sqlite3.Error as e:
             logger.error(f"Database error extracting adlists: {e}")
@@ -152,8 +154,35 @@ class AdGuardConverter:
 
     @staticmethod
     def convert_clients(clients: List[Dict[str, str]]) -> List[Dict[str, any]]:
-        return [
-            {
+        name_counts = {}
+        id_counts = {}
+        result = []
+        
+        for client in clients:
+            # MAC address must be unique
+            id = client["ip"].replace("-", ":").lower()
+            # Check if the id already exists
+            count = id_counts.get(id, 0) + 1
+            id_counts[id] = count
+
+            # Skip if already exists
+            if count > 1:
+                logger.info(f"Id {id} already exists, skipping")
+                continue
+
+            # Name must be unique
+            base_name = client['comment']
+            # Check if the name already exists
+            count = name_counts.get(base_name, 0) + 1
+            name_counts[base_name] = count
+
+            # Append number if necessary
+            if count > 1:
+                name = f"{base_name} ({count})"
+            else:
+                name = base_name
+
+            result.append({
                 "safe_search": {
                     "enabled": False,
                     "bing": True,
@@ -170,9 +199,10 @@ class AdGuardConverter:
                     },
                     "ids": []
                 },
-                "name": client["comment"],
-                "ids": client["ip"],
+                "name": name,
+                "ids": [id],
                 "upstreams": [],
+                "uid": str(uuid.uuid4()),
                 "upstreams_cache_size": 0,
                 "upstreams_cache_enabled": False,
                 "use_global_settings": True,
@@ -182,15 +212,15 @@ class AdGuardConverter:
                 "use_global_blocked_services": True,
                 "ignore_querylog": False,
                 "ignore_statistics": False,
-            }
-            for client in clients
-        ]
+            })
+        
+        return result
 
     @staticmethod
     def convert_adlists(adlists: List[Dict[str, str]]) -> List[Dict[str, any]]:
         return [
             {
-                'enabled': True,
+                'enabled': adlist['enabled'] == 1,
                 'url': adlist['address'],
                 'name': adlist['comment'],
                 'id': i + 1
@@ -204,6 +234,10 @@ class AdGuardConverter:
         converted_rules = []
         
         for rule_type, domain, comment in domain_rules:
+            # Filter out allow all and deny all rules
+            if domain == ".*":
+                logger.info("Skipping allow/deny all rule")
+                continue
             mapping = DOMAIN_TYPE_MAPPING.get(rule_type, {"prefix": "", "suffix": ""})
             rule = f"{mapping['prefix']}{domain}{mapping['suffix']}"
             converted_rules.append(rule)
@@ -239,19 +273,19 @@ class FileWriter:
     """Handles writing output files."""
     
     @staticmethod
-    def write_yaml(data: List[Dict], filename: str, description: str = "", toplevelindent: bool = False) -> None:
+    def write_yaml(data: List[Dict], filename: str, description: str = "", toplevelindent: int = 0) -> None:
         """Write data to YAML file."""
         try:
             with open(filename, 'w') as f:
                 if description:
                     f.write(f"# {description}\n")
-                if toplevelindent:
+                if toplevelindent > 0:
                     # Dump normally
                     yaml_str = yaml.dump(data, default_flow_style=False, indent=2, sort_keys=False)
 
-                    # Add 4 spaces before top-level dashes
-                    yaml_str = yaml_str.replace("\n", "\n    ")
-                    yaml_str = "    " + yaml_str
+                    # Add spaces before top-level dashes
+                    yaml_str = yaml_str.replace("\n", "\n" + " " * toplevelindent)
+                    yaml_str = " " * toplevelindent + yaml_str
 
                     # Save to file
                     f.write(yaml_str)
@@ -328,7 +362,7 @@ class ConversionOrchestrator:
             converted, 
             'clients.yaml', 
             f'AdGuard Home clients ({len(converted)} entries)',
-            toplevelindent=True
+            toplevelindent=4
         )
         return True
     
@@ -385,7 +419,8 @@ class ConversionOrchestrator:
             self.writer.write_yaml(
                 all_rewrites,
                 'dns_rewrites.yaml',
-                f'DNS rewrites ({len(all_rewrites)} total entries)'
+                f'DNS rewrites ({len(all_rewrites)} total entries)',
+                toplevelindent=4
             )
         else:
             logger.info("No custom DNS entries or CNAME records found")
@@ -403,9 +438,10 @@ class ConversionOrchestrator:
         print("="*60)
         print("1. Stop AdGuardHome with AdGuardHome -s stop")
         print("2. Copy the contents of adlists.yaml into AdGuardHome.yaml under 'filters'")
-        print("4. custom_dns.yaml and dns_rewrites.yaml should both be copied into AdGuardHome.yaml under the 'rewrites' key.")
+        print("3. Copy the contents of clients.yaml into AdGuardHome.yaml under 'clients->persistent'")
+        print("4. The contents of dns_rewrites.yaml should be copied into AdGuardHome.yaml under the 'rewrites' key.")
         print("5. Start up AdGuardHome again with AdGuardHome -s start")
-        print("3. Copy rules from custom_filters.txt to Custom Filtering Rules")
+        print("6. Copy rules from custom_filters.txt to Custom Filtering Rules")
         print("="*60)
 
 
