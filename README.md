@@ -1,6 +1,7 @@
 # Migrate from Pihole v6 to Adguard Home
 
 This tool will take a Teleporter export and convert it into Adguard Home style yaml (or in the case of allowlists / blocklists, Adblock-style rulesets)
+
 Because Pihole also takes into account clients and groups which can be enabled or disabled, take a good look if the behaviour from Adguard Home actually matches what you expect. E.g. a blocklist might be enabled, but only for a specific group of clients. This migrationtool does not take that into account.
 
 ## Steps
